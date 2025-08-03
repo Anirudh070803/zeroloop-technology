@@ -4,6 +4,8 @@ import subprocess
 import json
 import tempfile
 from pathlib import Path
+from . import logic
+import requests
 
 celery_app = Celery(
     "tasks",
@@ -12,38 +14,43 @@ celery_app = Celery(
 )
 
 @celery_app.task
-def run_slither_task(contract_code: str):
+def run_slither_task(contract_code: str, client_id: str):
     """
-    Receives smart contract code, saves it to a temporary file,
-    runs a Slither scan, and returns the JSON results.
+    Runs a Slither scan, enhances the report with AI, and posts the
+    final report back to the main API server.
     """
     with tempfile.TemporaryDirectory() as temp_dir:
-        temp_path = Path(temp_dir)
-        contract_file = temp_path / "contract.sol"
+        contract_file = Path(temp_dir) / "contract.sol"
         with open(contract_file, "w") as f:
             f.write(contract_code)
 
-        output_file = temp_path / "slither-output.json"
+        output_file = Path(temp_dir) / "slither-output.json"
         command = ['slither', str(contract_file), '--json', str(output_file)]
         subprocess.run(command, capture_output=True, text=True)
 
         try:
             with open(output_file, 'r') as f:
-                return json.load(f)
+                scan_data = json.load(f)
+            
+            ai_report = logic.generate_ai_report(scan_data)
+            
+            # Send the final, enhanced report back to the main server
+            requests.post(
+                f"http://backend:8000/internal/scan-result/{client_id}",
+                json=ai_report
+            )
         except (FileNotFoundError, json.JSONDecodeError):
-            return {"success": False, "error": "Slither scan failed to produce a valid report."}
+            error_report = {"summary": "Slither scan failed.", "vulnerabilities": []}
+            requests.post(
+                f"http://backend:8000/internal/scan-result/{client_id}",
+                json=error_report
+            )
 
-# --- Add this new task ---
 @celery_app.task
 def run_echidna_task(contract_code: str, test_contract_code: str, test_contract_name: str):
-    """
-    Receives a main contract and a test contract, saves them with correct names,
-    runs an Echidna fuzzing test, and returns the output.
-    """
+    # This function remains unchanged from your version
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
-
-        # FIX: Use the filenames that the import statement expects.
         contract_file = temp_path / "Vulnerable.sol"
         test_file = temp_path / "TestVulnerable.sol"
 
@@ -52,19 +59,11 @@ def run_echidna_task(contract_code: str, test_contract_code: str, test_contract_
         with open(test_file, "w") as f:
             f.write(test_contract_code)
 
-        # FIX: The command should point to the test file, which imports the other.
         command = ['echidna', str(test_file), '--contract', test_contract_name]
-
         result = subprocess.run(
-            command,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT
+            command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
         )
-
         combined_output = result.stdout
-
-        # Improved error checking for more accurate results
         if "Couldn't compile" in combined_output:
             return {"success": False, "error": "Compilation Failed", "output": combined_output}
         elif "falsified" in combined_output:

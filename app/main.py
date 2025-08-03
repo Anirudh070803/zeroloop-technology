@@ -1,54 +1,42 @@
 # app/main.py
-from fastapi import FastAPI, Body, UploadFile, File, HTTPException
-from .celery_tasks import run_slither_task, celery_app
-from . import schemas, logic
+from fastapi import FastAPI, UploadFile, File, HTTPException, WebSocket, Body
+from .celery_tasks import run_slither_task
+from . import schemas
+from .connection_manager import manager
 
 app = FastAPI(title="ZeroLoop Technology API")
 
-@app.post("/scan", response_model=schemas.ScanResponse)
-def start_scan(request: schemas.ScanRequest):
+@app.post("/scan/file", response_model=schemas.ScanTaskResponse)
+async def start_scan_from_file(client_id: str = Body(...), file: UploadFile = File(...)):
     """
-    Receives smart contract code as JSON and starts a Slither scan.
-    """
-    task = run_slither_task.delay(request.contract_code)
-    return {"task_id": task.id, "status": "Scan started"}
-
-@app.post("/scan/text", response_model=schemas.ScanResponse)
-def start_scan_from_text(contract_code: str = Body(..., media_type="text/plain")):
-    """
-    Receives raw smart contract code as plain text and starts a scan.
-    """
-    task = run_slither_task.delay(contract_code)
-    return {"task_id": task.id, "status": "Scan started"}
-
-# --- Add this new endpoint ---
-@app.post("/scan/file", response_model=schemas.ScanResponse)
-async def start_scan_from_file(file: UploadFile = File(...)):
-    """
-    Receives a smart contract file, starts a Slither scan in the background,
-    and returns a task ID.
+    Receives a smart contract file and a client_id, starts a scan,
+    and returns immediately.
     """
     if not file.filename.endswith('.sol'):
-        raise HTTPException(status_code=400, detail="Invalid file type. Please upload a .sol file.")
+        raise HTTPException(status_code=400, detail="Invalid file type.")
     
     contract_code = (await file.read()).decode('utf-8')
-    task = run_slither_task.delay(contract_code)
-    return {"task_id": task.id, "status": "Scan started"}
+    
+    # Start the background task, passing the client_id
+    run_slither_task.delay(contract_code, client_id)
+    
+    # We use the client_id as the task_id for simplicity
+    return {"task_id": client_id, "status": "Scan started"}
 
-@app.get("/results/{task_id}", response_model=schemas.ResultResponse)
-def get_scan_results(task_id: str):
+@app.post("/internal/scan-result/{client_id}")
+async def post_scan_result(client_id: str, report: schemas.HumanReadableReport):
     """
-    Retrieves the status and result of a background scan task.
+    An internal-only endpoint for the Celery worker to post results to.
+    This endpoint then pushes the result to the client via WebSocket.
     """
-    task_result = celery_app.AsyncResult(task_id)
-    
-    if task_result.state == 'SUCCESS':
-        raw_results = task_result.get()
-        # Use our new function from logic.py
-        human_readable_report = logic.generate_human_readable_report(raw_results)
-        return {"task_id": task_id, "status": task_result.state, "result": human_readable_report}
-    
-    elif task_result.state == 'FAILURE':
-        return {"task_id": task_id, "status": task_result.state, "result": "Task failed to execute."}
-        
-    return {"task_id": task_id, "status": task_result.state, "result": "Scan is still in progress..."}
+    await manager.send_personal_message(report.model_dump_json(), client_id)
+    return {"status": "result delivered"}
+
+@app.websocket("/ws/{client_id}")
+async def websocket_endpoint(websocket: WebSocket, client_id: str):
+    await manager.connect(client_id, websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except Exception:
+        manager.disconnect(client_id)
