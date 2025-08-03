@@ -1,0 +1,18 @@
+# Environment variables
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environment
+venv/
+__pycache__/
+
+# Docker
+.dockerignore
+
+# Build artifacts
+slither-output.json
+combined_solc.json
