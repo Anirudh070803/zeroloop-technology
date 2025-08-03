@@ -1,35 +1,86 @@
 # app/main.py
-from fastapi import FastAPI, UploadFile, File, HTTPException, WebSocket, Body
-from .celery_tasks import run_slither_task
-from . import schemas
+from fastapi import FastAPI, UploadFile, File, HTTPException, WebSocket, Body, Depends, status
+from fastapi.security import OAuth2PasswordRequestForm
+from sqlalchemy.orm import Session
+from typing import List
+from datetime import timedelta
+
+from . import models, crud, logic, security, config, schemas
+from .database import SessionLocal, engine
 from .connection_manager import manager
+
+# This should only be in your backend's main entrypoint to create tables
+# In a production app with migrations, this would be handled differently.
+# models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="ZeroLoop Technology API")
 
-@app.post("/scan/file", response_model=schemas.ScanTaskResponse)
-async def start_scan_from_file(client_id: str = Body(...), file: UploadFile = File(...)):
-    """
-    Receives a smart contract file and a client_id, starts a scan,
-    and returns immediately.
-    """
-    if not file.filename.endswith('.sol'):
-        raise HTTPException(status_code=400, detail="Invalid file type.")
-    
-    contract_code = (await file.read()).decode('utf-8')
-    
-    # Start the background task, passing the client_id
-    run_slither_task.delay(contract_code, client_id)
-    
-    # We use the client_id as the task_id for simplicity
-    return {"task_id": client_id, "status": "Scan started"}
+# --- CORS Middleware ---
+origins = ["*"]
+app.add_middleware(
+    schemas.CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
+# --- Dependencies ---
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+def get_current_user(db: Session = Depends(get_db), token: str = Depends(security.oauth2_scheme)):
+    # This function will get the current user from the token
+    # We will build this logic out fully in the next steps.
+    # For now, it's a placeholder.
+    pass
+
+# --- Authentication Endpoints ---
+@app.post("/users/", response_model=schemas.User)
+def create_user_endpoint(user: schemas.UserCreate, db: Session = Depends(get_db)):
+    db_user = crud.get_user_by_email(db, email=user.email)
+    if db_user:
+        raise HTTPException(status_code=400, detail="Email already registered")
+    return crud.create_user(db=db, user=user)
+
+@app.post("/token", response_model=schemas.Token)
+def login_for_access_token(db: Session = Depends(get_db), form_data: OAuth2PasswordRequestForm = Depends()):
+    user = crud.authenticate_user(db, email=form_data.username, password=form_data.password)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    access_token_expires = timedelta(minutes=config.ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = security.create_access_token(
+        data={"sub": user.email}, expires_delta=access_token_expires
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
+
+
+# --- Scanning Endpoints ---
+@app.post("/scan/file", response_model=schemas.ScanTaskResponse)
+async def start_comprehensive_scan(client_id: str = Body(...), contract_file: UploadFile = File(...), test_file: UploadFile = File(...)):
+    if not contract_file.filename.endswith('.sol') or not test_file.filename.endswith('.sol'):
+        raise HTTPException(status_code=400, detail="Invalid file type. Please upload .sol files.")
+    
+    contract_code = (await contract_file.read()).decode('utf-8')
+    test_contract_code = (await test_file.read()).decode('utf-8')
+    
+    logic.run_slither_task.delay(contract_code, client_id)
+    logic.run_echidna_task.delay(contract_code, test_contract_code, 'TestVulnerable', client_id)
+    
+    return {"task_id": client_id, "status": "Comprehensive scan started"}
+
+# --- Internal & WebSocket Endpoints ---
 @app.post("/internal/scan-result/{client_id}")
-async def post_scan_result(client_id: str, report: schemas.HumanReadableReport):
-    """
-    An internal-only endpoint for the Celery worker to post results to.
-    This endpoint then pushes the result to the client via WebSocket.
-    """
-    await manager.send_personal_message(report.model_dump_json(), client_id)
+async def post_scan_result(client_id: str, result: schemas.ScanResultPayload):
+    await manager.send_personal_message(result.model_dump_json(), client_id)
     return {"status": "result delivered"}
 
 @app.websocket("/ws/{client_id}")

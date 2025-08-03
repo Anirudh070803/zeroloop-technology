@@ -7,17 +7,16 @@ client_celery_app = Celery(
 )
 
 def main():
-    print("Reading smart contract and test files...")
+    print("Reading smart contract file...")
     with open('Vulnerable.sol', 'r') as f:
         contract_code = f.read()
-    with open('TestVulnerable.sol', 'r') as f:
-        test_contract_code = f.read()
 
-    print("Sending Echidna scan task to the Celery worker...")
+    print("Sending AI-Enhanced Slither scan task to the Celery worker...")
     
+    # Send the task to run the Slither scan
     task = client_celery_app.send_task(
-        'app.celery_tasks.run_echidna_task',
-        args=[contract_code, test_contract_code, 'TestVulnerable']
+        'app.celery_tasks.run_slither_task',
+        args=[contract_code]
     )
     
     print(f"Task sent! The Task ID is: {task.id}")
