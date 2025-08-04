@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { Paper, Typography, Button, Box, CircularProgress, Alert } from '@mui/material';
 import { v4 as uuidv4 } from 'uuid';
+import StaticReport from './StaticReport';
+import DynamicReport from './DynamicReport';
 
 const Scanner = () => {
     const [contractFile, setContractFile] = useState(null);
@@ -12,13 +14,13 @@ const Scanner = () => {
 
     useEffect(() => {
         const ws = new WebSocket(`ws://localhost:8000/ws/${clientId}`);
-
         ws.onmessage = (event) => {
             const resultData = JSON.parse(event.data);
             setResults(prevResults => [...prevResults, resultData]);
-            setIsScanning(false);
         };
-
+        ws.onclose = () => {
+            setIsScanning(false); // Stop scanning indicator when connection closes
+        };
         return () => {
             ws.close();
         };
@@ -26,21 +28,18 @@ const Scanner = () => {
 
     const handleSubmit = async () => {
         if (!contractFile || !testFile) return;
-
         setIsScanning(true);
         setResults([]);
         const formData = new FormData();
         formData.append('client_id', clientId);
         formData.append('contract_file', contractFile);
         formData.append('test_file', testFile);
-
         try {
             await axios.post('http://localhost:8000/scan/file', formData, {
                 headers: { 'Content-Type': 'multipart/form-data' },
             });
         } catch (error) {
             console.error("Failed to start scan:", error);
-            // Use the Alert component for a better error message
             setResults([{ error: `Failed to start scan: ${error.message}` }]);
             setIsScanning(false);
         }
@@ -61,7 +60,6 @@ const Scanner = () => {
                     <input type="file" hidden accept=".sol" onChange={(e) => setContractFile(e.target.files[0])} />
                 </Button>
                 {contractFile && <Typography variant="caption">{contractFile.name}</Typography>}
-                
                 <Button variant="outlined" component="label">
                     Test File (.sol)
                     <input type="file" hidden accept=".sol" onChange={(e) => setTestFile(e.target.files[0])} />
@@ -86,14 +84,14 @@ const Scanner = () => {
                 <Box sx={{ mt: 4 }}>
                     <Typography variant="h6" gutterBottom>Scan Results:</Typography>
                     {results.map((result, index) => (
-                        <Box key={index} sx={{my: 1}}>
+                        <Box key={index} sx={{my: 2}}>
                             {result.error ? (
                                 <Alert severity="error">{result.error}</Alert>
-                            ) : (
-                                <Paper variant="outlined" sx={{ p: 2, whiteSpace: 'pre-wrap', fontFamily: 'monospace', maxHeight: 400, overflow: 'auto' }}>
-                                    {JSON.stringify(result.data, null, 2)}
-                                </Paper>
-                            )}
+                            ) : result.scan_type === 'static_analysis' ? (
+                                <StaticReport data={result.data} />
+                            ) : result.scan_type === 'dynamic_analysis' ? (
+                                <DynamicReport data={result.data} />
+                            ) : null}
                         </Box>
                     ))}
                 </Box>

@@ -13,10 +13,12 @@ celery_app = Celery(
     backend="redis://redis:6379/0"
 )
 
+# --- CORRECTED FUNCTION SIGNATURE BELOW ---
 @celery_app.task
-def run_slither_task(contract_code: str):
+def run_slither_task(contract_code: str, client_id: str):
     """
-    Runs a Slither scan and enhances the report with AI.
+    Runs a Slither scan, enhances the report with AI, and posts the
+    final report back to the main API server.
     """
     with tempfile.TemporaryDirectory() as temp_dir:
         contract_file = Path(temp_dir) / "contract.sol"
@@ -31,21 +33,25 @@ def run_slither_task(contract_code: str):
             with open(output_file, 'r') as f:
                 scan_data = json.load(f)
             
-            # Generate the AI-enhanced report instead of returning raw data
             ai_report = logic.generate_ai_report(scan_data)
-            return ai_report
+            
+            requests.post(
+                f"http://backend:8000/internal/scan-result/{client_id}",
+                json={"scan_type": "static_analysis", "data": ai_report}
+            )
         except (FileNotFoundError, json.JSONDecodeError):
-            return {"success": False, "error": "Slither scan failed to produce a valid report."}
+            error_report = {"summary": "Slither scan failed.", "vulnerabilities": []}
+            requests.post(
+                f"http://backend:8000/internal/scan-result/{client_id}",
+                json={"scan_type": "static_analysis", "data": error_report}
+            )
 
+# This task already has the correct arguments, no change needed here.
 @celery_app.task
-def run_echidna_task(contract_code: str, test_contract_code: str, test_contract_name: str):
-    """
-    Runs an Echidna fuzzing test and returns the output.
-    """
+def run_echidna_task(contract_code: str, test_contract_code: str, test_contract_name: str, client_id: str):
     with tempfile.TemporaryDirectory() as temp_dir:
-        temp_path = Path(temp_dir)
-        contract_file = temp_path / "Vulnerable.sol"
-        test_file = temp_path / "TestVulnerable.sol"
+        contract_file = Path(temp_dir) / "Vulnerable.sol"
+        test_file = Path(temp_dir) / "TestVulnerable.sol"
         with open(contract_file, "w") as f:
             f.write(contract_code)
         with open(test_file, "w") as f:
@@ -55,14 +61,13 @@ def run_echidna_task(contract_code: str, test_contract_code: str, test_contract_
             command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
         )
         combined_output = result.stdout
+        echidna_report = {}
         if "Couldn't compile" in combined_output:
-            return {"success": False, "error": "Compilation Failed", "output": combined_output}
+            echidna_report = {"success": False, "error": "Compilation Failed", "output": combined_output}
         elif "falsified" in combined_output:
-            return {"success": True, "bug_found": True, "output": combined_output}
+            echidna_report = {"success": True, "bug_found": True, "output": combined_output}
         else:
-            return {"success": True, "bug_found": False, "output": combined_output}
-            
-        # Send the result back to the main server
+            echidna_report = {"success": True, "bug_found": False, "output": combined_output}
         requests.post(
             f"http://backend:8000/internal/scan-result/{client_id}",
             json={"scan_type": "dynamic_analysis", "data": echidna_report}
